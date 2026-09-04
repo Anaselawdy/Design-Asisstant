@@ -1,5 +1,48 @@
 import { GoogleGenAI, Modality, Part, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Type } from "@google/genai";
 import { ImageFile, AudioFile } from '../types';
+import {
+  getNvidiaApiKey,
+  setStoredNvidiaApiKey,
+  hasNvidiaApiKey,
+  testNvidiaConnection,
+  formatNvidiaError,
+  callNvidiaChat,
+  callNvidiaVision,
+  generateNvidiaImage,
+  NVIDIA_MODELS,
+} from './nvidiaService';
+
+export {
+  getNvidiaApiKey,
+  setStoredNvidiaApiKey,
+  hasNvidiaApiKey,
+  testNvidiaConnection,
+  formatNvidiaError,
+  NVIDIA_MODELS,
+};
+
+export type AiProvider = 'nvidia' | 'gemini';
+
+export function getActiveProvider(): AiProvider {
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem('ai_provider');
+    if (saved === 'nvidia' || saved === 'gemini') return saved;
+  }
+  // Default to NVIDIA as requested
+  if (hasNvidiaApiKey()) return 'nvidia';
+  if (hasApiKey()) return 'gemini';
+  return 'nvidia';
+}
+
+export function setActiveProvider(p: AiProvider): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('ai_provider', p);
+  }
+}
+
+export function hasAnyApiKey(): boolean {
+  return hasNvidiaApiKey() || hasApiKey();
+}
 
 export function getApiKey(): string {
   if (typeof window !== 'undefined') {
@@ -47,7 +90,12 @@ export const ai: GoogleGenAI = new Proxy({} as GoogleGenAI, {
   }
 });
 
-export async function testApiKey(candidateKey?: string): Promise<{ success: boolean; message: string }> {
+export async function testApiKey(candidateKey?: string, provider?: AiProvider): Promise<{ success: boolean; message: string }> {
+  const activeP = provider || getActiveProvider();
+  if (activeP === 'nvidia') {
+    return testNvidiaConnection(candidateKey);
+  }
+
   const key = (candidateKey !== undefined ? candidateKey : getApiKey()).trim();
   if (!key) {
     return { success: false, message: 'Please provide a Gemini API Key.' };
@@ -100,10 +148,14 @@ const safetySettings = [
 
 /**
  * Parses and formats any Gemini API error into a friendly, readable message.
- * Specially handles 429 quota exhaustion and rate limit errors.
  */
 export function formatGeminiError(error: unknown): string {
   if (!error) return 'An unexpected error occurred.';
+
+  const provider = getActiveProvider();
+  if (provider === 'nvidia') {
+    return formatNvidiaError(error);
+  }
 
   let rawMsg = '';
   let statusCode: number | null = null;
@@ -120,7 +172,6 @@ export function formatGeminiError(error: unknown): string {
     else rawMsg = JSON.stringify(error);
   }
 
-  // If rawMsg contains a JSON structure (like {"error":{"code":429,...}}), parse it
   try {
     const jsonMatch = rawMsg.match(/\{[\s\S]*"error"[\s\S]*\}/);
     if (jsonMatch) {
@@ -132,12 +183,11 @@ export function formatGeminiError(error: unknown): string {
       }
     }
   } catch {
-    // Continue with string analysis
+    // Continue
   }
 
   const lower = rawMsg.toLowerCase();
 
-  // Detect 429 / Quota / Rate Limits
   if (
     statusCode === 429 ||
     statusStr === 'RESOURCE_EXHAUSTED' ||
@@ -148,17 +198,15 @@ export function formatGeminiError(error: unknown): string {
     lower.includes('rate limit') ||
     lower.includes('too many requests')
   ) {
-    return 'Rate Limit / Quota Reached (429): You exceeded your current Gemini API quota. Please wait a moment before trying again, or configure a paid API key in Google AI Studio to increase your limits.';
+    return 'Rate Limit / Quota Reached (429): You exceeded your current Gemini API quota. Please wait a moment before trying again, or switch to NVIDIA NIM free models in API Settings.';
   }
 
-  // Detect Safety Blocks
   if (lower.includes('safety') || lower.includes('harm_category') || lower.includes('blocked')) {
     return 'The request was stopped by safety filters. Please adjust the prompt or reference image.';
   }
 
-  // Detect Invalid or Missing API Keys
   if (lower.includes('api_key_invalid') || lower.includes('api key not valid') || statusCode === 401 || statusCode === 403) {
-    return 'Invalid or missing Gemini API Key. Please verify your API key in Google AI Studio Settings.';
+    return 'Invalid or missing API Key. Please verify your API key in API Settings.';
   }
 
   return rawMsg.trim() || 'Request failed. Please try again.';
@@ -186,7 +234,7 @@ async function callWithRetry<T>(
 
       if (isRateLimit && attempt < retries) {
         const delay = baseDelay * Math.pow(2, attempt) + Math.random() * 500;
-        console.warn(`[Gemini API] Quota/Rate limit encountered. Retrying in ${Math.round(delay)}ms (Attempt ${attempt + 1}/${retries})...`);
+        console.warn(`[API] Rate limit encountered. Retrying in ${Math.round(delay)}ms (Attempt ${attempt + 1}/${retries})...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
@@ -196,9 +244,6 @@ async function callWithRetry<T>(
   throw new Error(formatGeminiError(lastError));
 }
 
-/**
- * Sequential queue for image generation to prevent bursting the API rate limiter.
- */
 let imageGenerationQueue = Promise.resolve();
 
 function queueImageOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -207,7 +252,6 @@ function queueImageOperation<T>(operation: () => Promise<T>): Promise<T> {
   };
 
   const resultPromise = imageGenerationQueue.then(execute, execute);
-  // Add a 600ms buffer after each image operation to avoid rate limit spikes
   imageGenerationQueue = resultPromise.then(
     () => new Promise((resolve) => setTimeout(resolve, 600)),
     () => new Promise((resolve) => setTimeout(resolve, 600))
@@ -241,10 +285,18 @@ export async function generateImage(
   styleImages: ImageFile[] | null,
   aspectRatio: string = "1:1"
 ): Promise<ImageFile> {
-  const model = 'gemini-3.1-flash-lite-image';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    let fullPrompt = prompt;
+    if (productImages && productImages.length > 0) {
+      fullPrompt = `High quality commercial product photo: ${prompt}. Clean studio lighting, sharp focus.`;
+    }
+    return generateNvidiaImage(fullPrompt, aspectRatio);
+  }
+
+  const model = 'gemini-2.5-flash-image';
   const parts: Part[] = [];
 
-  // Add product references if they exist
   if (productImages && productImages.length > 0) {
     productImages.forEach((productImage) => {
       parts.push({
@@ -270,16 +322,20 @@ export async function generateImage(
   }
 
   return queueImageOperation(async () => {
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: { parts: parts },
-      config: {
-        imageConfig: { aspectRatio: aspectRatio as any },
-        safetySettings: safetySettings,
-      },
-    });
-
-    return handleApiResponse(response);
+    try {
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: { parts: parts },
+        config: {
+          imageConfig: { aspectRatio: aspectRatio as any },
+          safetySettings: safetySettings,
+        },
+      });
+      return handleApiResponse(response);
+    } catch (err) {
+      // If Gemini image fails or is unavailable, fallback to NVIDIA high-res generator
+      return generateNvidiaImage(prompt, aspectRatio);
+    }
   });
 }
 
@@ -287,8 +343,12 @@ export async function editImage(
   baseImage: ImageFile,
   prompt: string,
 ): Promise<ImageFile> {
-  const model = 'gemini-3.1-flash-lite-image';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    return generateNvidiaImage(`Edit photo: ${prompt}. Photorealistic high resolution commercial photography.`);
+  }
 
+  const model = 'gemini-2.5-flash-image';
   const parts: Part[] = [
     {
       inlineData: {
@@ -300,13 +360,16 @@ export async function editImage(
   ];
 
   return queueImageOperation(async () => {
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: { parts: parts },
-      config: { safetySettings: safetySettings },
-    });
-
-    return handleApiResponse(response);
+    try {
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: { parts: parts },
+        config: { safetySettings: safetySettings },
+      });
+      return handleApiResponse(response);
+    } catch {
+      return generateNvidiaImage(prompt);
+    }
   });
 }
 
@@ -321,7 +384,13 @@ export async function analyzeImageForPrompt(
   images: ImageFile[],
   instructions: string
 ): Promise<string> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    const textPrompt = `Analyze the provided image(s) in detail. Craft a descriptive, professional text-to-image prompt. Instruction: ${instructions}`;
+    return callNvidiaVision(textPrompt, images);
+  }
+
+  const model = 'gemini-2.5-flash';
   const parts: Part[] = [];
 
   images.forEach((image) => {
@@ -347,7 +416,13 @@ export async function analyzeImageForPrompt(
 }
 
 export async function analyzeStyleImage(images: ImageFile[]): Promise<string> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    const prompt = "Analyze the visual style of these images. Describe the lighting, color palette, mood, and aesthetic in detail for a text-to-image prompt.";
+    return callNvidiaVision(prompt, images);
+  }
+
+  const model = 'gemini-2.5-flash';
   const parts: Part[] = images.map((img) => ({
     inlineData: {
       data: img.base64,
@@ -369,7 +444,22 @@ export async function analyzeStyleImage(images: ImageFile[]): Promise<string> {
 }
 
 export async function analyzeLogoForBranding(images: ImageFile[]): Promise<{ colors: string[] }> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    const prompt = "Analyze this logo and extract the primary brand colors. Return ONLY a JSON object with a 'colors' key containing a string array of hex codes, e.g. {\"colors\": [\"#FF5733\", \"#000000\", \"#FFFFFF\"]}. Output no other text, only valid JSON.";
+    try {
+      const text = await callNvidiaVision(prompt, images);
+      const jsonMatch = text.match(/\{[\s\S]*"colors"[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+    } catch {
+      // Fallback
+    }
+    return { colors: ["#2563EB", "#000000", "#FFFFFF"] };
+  }
+
+  const model = 'gemini-2.5-flash';
   const parts: Part[] = images.map((img) => ({
     inlineData: {
       data: img.base64,
@@ -405,7 +495,12 @@ export async function analyzeLogoForBranding(images: ImageFile[]): Promise<{ col
 }
 
 export async function generatePromptFromText(instructions: string): Promise<string> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    return callNvidiaChat(`Expand this idea into a rich, detailed, and aesthetic text-to-image prompt: "${instructions}"`);
+  }
+
+  const model = 'gemini-2.5-flash';
   const prompt = `Expand this idea into a detailed text-to-image prompt: "${instructions}"`;
 
   return callWithRetry(async () => {
@@ -419,7 +514,12 @@ export async function generatePromptFromText(instructions: string): Promise<stri
 }
 
 export async function translateText(text: string): Promise<string> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    return callNvidiaChat(`Translate the following text to English accurately, preserving any technical or creative nuances. Return ONLY the translation:\n\n"${text}"`);
+  }
+
+  const model = 'gemini-2.5-flash';
   const prompt = `Translate the following text to English, preserving any technical or descriptive nuances: "${text}"`;
 
   return callWithRetry(async () => {
@@ -432,33 +532,41 @@ export async function translateText(text: string): Promise<string> {
 }
 
 export async function generateSpeech(text: string, styleInstructions: string, voiceName: string): Promise<AudioFile> {
-  const model = "gemini-3.1-flash-tts-preview";
-  const prompt = `Speak the following text ${styleInstructions ? '(' + styleInstructions + ')' : ''}: ${text}`;
+  // If Gemini API key is available, use Gemini TTS preview
+  if (hasApiKey()) {
+    try {
+      const model = "gemini-3.1-flash-tts-preview";
+      const prompt = `Speak the following text ${styleInstructions ? '(' + styleInstructions + ')' : ''}: ${text}`;
 
-  return callWithRetry(async () => {
-    const response = await ai.models.generateContent({
-      model,
-      contents: [{ parts: [{ text: prompt }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName },
+      return await callWithRetry(async () => {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [{ parts: [{ text: prompt }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
+              },
+            },
           },
-        },
-      },
-    });
+        });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!base64Audio) {
-      throw new Error('No audio data returned from the model.');
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (base64Audio) {
+          return {
+            base64: base64Audio,
+            name: `voiceover-${Date.now()}.wav`,
+          };
+        }
+        throw new Error('No audio returned');
+      });
+    } catch {
+      // Fallback
     }
+  }
 
-    return {
-      base64: base64Audio,
-      name: `voiceover-${Date.now()}.wav`,
-    };
-  });
+  throw new Error('Voiceover audio synthesis requires a Gemini API key or browser speech synthesis.');
 }
 
 export async function generateCampaignPlan(
@@ -467,7 +575,39 @@ export async function generateCampaignPlan(
   targetMarket: string = "Global",
   dialect: string = "English"
 ): Promise<any[]> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    const instruction = `Act as a professional Creative Director and Marketing Strategist. 
+Target Market: ${targetMarket}. Requested Content Dialect/Language: ${dialect}.
+Goal: "${userPrompt}". 
+
+Task: Generate 9 unique campaign post ideas tailored for the specified market and written in the requested dialect.
+Return a valid JSON array where each object has:
+- id: string (e.g. "1", "2")
+- scenario: highly descriptive visual prompt for AI image generation (English).
+- caption: engaging social media caption written STRICTLY in the specified dialect (${dialect})
+- tov: a short, catchy text suggestion or hook (max 5-7 words) intended to be written directly on the visual itself.
+- schedule: recommended posting day/time for the ${targetMarket} market.
+
+Return ONLY valid JSON array starting with [ and ending with ]. No markdown backticks, no commentary.`;
+
+    let rawText = '';
+    if (productImages && productImages.length > 0) {
+      rawText = await callNvidiaVision(instruction, productImages);
+    } else {
+      rawText = await callNvidiaChat(instruction);
+    }
+
+    try {
+      const match = rawText.match(/\[[\s\S]*\]/);
+      if (match) return JSON.parse(match[0]);
+    } catch (e) {
+      console.error('Failed to parse NVIDIA campaign plan JSON', e);
+    }
+    return [];
+  }
+
+  const model = 'gemini-2.5-flash';
   const parts: Part[] = [];
 
   if (productImages && productImages.length > 0) {
@@ -517,7 +657,17 @@ Return ONLY the raw JSON array.`;
 }
 
 export async function analyzeProductForCampaign(productImages: ImageFile[]): Promise<string> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    const prompt = `Analyze these image(s) to identify the product/service category and its market positioning. 
+Return a concise analysis including:
+1. Identified Category (e.g. Luxury Watches, Organic Skincare, Tech Services).
+2. Best Market Fit: Describe the ideal setting and audience for this product based on current market trends.
+Format as a clear, professional summary.`;
+    return callNvidiaVision(prompt, productImages);
+  }
+
+  const model = 'gemini-2.5-flash';
   const parts: Part[] = [];
   productImages.forEach((img) => parts.push({ inlineData: { data: img.base64, mimeType: img.mimeType } }));
 
@@ -542,7 +692,39 @@ export async function generateStoryboardPlan(
   subjectImages: ImageFile[],
   customInstructions: string
 ): Promise<any[]> {
-  const model = 'gemini-3.8-flash';
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    const instruction = `Act as a cinematic Storyboard Director and Scriptwriter. 
+Context/Prompt: "${customInstructions}".
+
+Task: Create a professional 9-scene storyboard sequence. 
+Maintain strict visual consistency for the subject/character from provided images.
+Each scene must have a unique camera angle to build a cinematic narrative.
+
+Return a JSON array of 9 objects:
+- sequence: number (1 to 9)
+- description: what is happening in the scene (Arabic)
+- cameraAngle: specific technical camera angle (e.g. Extreme Close-up, Low Angle, Wide Shot)
+- visualPrompt: extremely detailed English prompt for an AI image generator to create THIS scene. Include lighting, mood, and reference to the subject.
+Return ONLY valid JSON array starting with [ and ending with ].`;
+
+    let rawText = '';
+    if (subjectImages && subjectImages.length > 0) {
+      rawText = await callNvidiaVision(instruction, subjectImages);
+    } else {
+      rawText = await callNvidiaChat(instruction);
+    }
+
+    try {
+      const match = rawText.match(/\[[\s\S]*\]/);
+      if (match) return JSON.parse(match[0]);
+    } catch (e) {
+      console.error('Failed to parse NVIDIA storyboard JSON', e);
+    }
+    return [];
+  }
+
+  const model = 'gemini-2.5-flash';
   const parts: Part[] = [];
 
   if (subjectImages && subjectImages.length > 0) {
@@ -594,6 +776,37 @@ export async function generateMarketingAnalysis(
   brandData: { type: 'new' | 'existing'; name?: string; specialty?: string; brief?: string; link?: string },
   language: 'ar' | 'en'
 ): Promise<string> {
+  const provider = getActiveProvider();
+  if (provider === 'nvidia' || (!hasApiKey() && hasNvidiaApiKey())) {
+    let context = '';
+    if (brandData.type === 'existing') {
+      context = `Analyze the brand: ${brandData.link || brandData.name}. Assess market dynamics and strategic positioning.`;
+    } else {
+      context = `Strategic analysis for a NEW brand. Name: ${brandData.name}. Specialty: ${brandData.specialty}. Brief: ${brandData.brief}.`;
+    }
+
+    const prompt = `Act as a world-class CMO and Marketing Strategist. 
+${context}
+
+Task: Provide a detailed, professional marketing strategy report.
+Language: ${language === 'ar' ? 'Arabic' : 'English'}.
+
+The report MUST include:
+1. SWOT Analysis (Strengths, Weaknesses, Opportunities, Threats).
+2. Detailed Buyer Persona (Demographics, Psychographics, Buying Behavior).
+3. Competitor Analysis & Market Gaps.
+4. Value Proposition (USP).
+5. Integrated Go-To-Market (GTM) Strategy.
+6. Smart Pricing Strategy Recommendation.
+7. 30-60-90 Day Execution Roadmap.
+8. Growth KPI Dashboard (Metric recommendations).
+
+Format the output with professional headers, bullet points, and a tone of high-level business consultation.
+Use Markdown for formatting.`;
+
+    return callNvidiaChat(prompt, undefined, { model: NVIDIA_MODELS.text, max_tokens: 3000 });
+  }
+
   let context = '';
   if (brandData.type === 'existing') {
     context = `Analyze the brand from this link: ${brandData.link}. Use Google Search to find its real current position, competitors, and audience feedback.`;
@@ -622,7 +835,7 @@ Use Markdown for formatting.`;
 
   return callWithRetry(async () => {
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: { parts: [{ text: prompt }] },
       config: {
         tools: [{ googleSearch: {} }],

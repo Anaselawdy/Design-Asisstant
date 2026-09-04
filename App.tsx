@@ -25,7 +25,7 @@ import StoryboardStudio from './components/StoryboardStudio';
 import MarketingStudio from './components/MarketingStudio';
 import TabBar from './components/TabBar';
 import ApiKeyModal from './components/ApiKeyModal';
-import { hasApiKey } from './services/geminiService';
+import { hasAnyApiKey, getActiveProvider } from './services/geminiService';
 import { LIGHTING_STYLES, CAMERA_PERSPECTIVES, VOICES } from './constants';
 
 const LOGO_IMAGE_URL = "https://i.ibb.co/MDrpHPzS/Artboard-1.png";
@@ -323,11 +323,13 @@ function App() {
   const [theme, setTheme] = useState('dark');
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [apiKeyActive, setApiKeyActive] = useState(false);
+  const [activeProvider, setActiveProvider] = useState<'nvidia' | 'gemini'>('nvidia');
   const contentRef = useRef<HTMLDivElement>(null);
   const mobileNavRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setApiKeyActive(hasApiKey());
+    setApiKeyActive(hasAnyApiKey());
+    setActiveProvider(getActiveProvider());
   }, []);
 
   const [creatorProjects, setCreatorProjects] = useState<CreatorStudioProject[]>([createNewCreatorProject(0)]);
@@ -695,11 +697,17 @@ function App() {
                 <button
                   onClick={() => setIsApiKeyModalOpen(true)}
                   className="ml-2 flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 text-white transition-all hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer shadow-sm"
-                  title="Configure Gemini API Key"
+                  title="Configure AI Models (NVIDIA / Gemini)"
                 >
-                  <span className={`w-2 h-2 rounded-full ${apiKeyActive ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-amber-400 animate-pulse'}`} />
-                  <span className="font-mono">API Key</span>
-                  <span className="text-[10px] opacity-75 font-mono">{apiKeyActive ? 'Connected' : 'Setup'}</span>
+                  <span className={`w-2 h-2 rounded-full ${
+                    apiKeyActive 
+                      ? activeProvider === 'nvidia' 
+                        ? 'bg-[#76B900] shadow-[0_0_8px_#76B900]' 
+                        : 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' 
+                      : 'bg-amber-400 animate-pulse'
+                  }`} />
+                  <span className="font-mono">{activeProvider === 'nvidia' ? 'NVIDIA' : 'Gemini'}</span>
+                  <span className="text-[10px] opacity-75 font-mono">{apiKeyActive ? 'Active' : 'Setup'}</span>
                 </button>
             </div>
         </div>
@@ -757,8 +765,8 @@ function App() {
                   onClick={() => setIsApiKeyModalOpen(true)}
                   className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 border border-white/10 text-white"
                 >
-                  <span className={`w-2 h-2 rounded-full ${apiKeyActive ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
-                  <span>API</span>
+                  <span className={`w-2 h-2 rounded-full ${apiKeyActive ? (activeProvider === 'nvidia' ? 'bg-[#76B900]' : 'bg-emerald-400') : 'bg-amber-400 animate-pulse'}`} />
+                  <span>{activeProvider === 'nvidia' ? 'NVIDIA' : 'API'}</span>
                 </button>
             </div>
             <button 
@@ -883,8 +891,15 @@ function App() {
       </div>
       <ApiKeyModal
         isOpen={isApiKeyModalOpen}
-        onClose={() => setIsApiKeyModalOpen(false)}
-        onKeyUpdated={setApiKeyActive}
+        onClose={() => {
+          setIsApiKeyModalOpen(false);
+          setApiKeyActive(hasAnyApiKey());
+          setActiveProvider(getActiveProvider());
+        }}
+        onKeyUpdated={() => {
+          setApiKeyActive(hasAnyApiKey());
+          setActiveProvider(getActiveProvider());
+        }}
       />
     </div>
   );
