@@ -11,6 +11,16 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+!.env.example
+
+# API Keys & Secrets
+[Aa][Pp][Ii] [Kk][Ee][Yy]/
+[Aa][Pp][Ii] [Kk][Ee][Yy]
+*.key
+keys
+/keys
 
 # Editor directories and files
 .vscode/*

@@ -1,0 +1,28 @@
+/* Custom styles and smooth animations */
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+}
+
+/* Custom scrollbars */
+.suggestions-scrollbar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.suggestions-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.suggestions-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.suggestions-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.mask-linear-fade {
+  mask-image: linear-gradient(to right, transparent, black 15px, black calc(100% - 15px), transparent);
+}

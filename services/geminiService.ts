@@ -1,16 +1,83 @@
 import { GoogleGenAI, Modality, Part, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Type } from "@google/genai";
 import { ImageFile, AudioFile } from '../types';
 
-const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "";
+export function getApiKey(): string {
+  if (typeof window !== 'undefined') {
+    const local = localStorage.getItem('gemini_api_key');
+    if (local && local.trim()) return local.trim();
+  }
+  return (process.env.API_KEY || process.env.GEMINI_API_KEY || '').trim();
+}
 
-const ai = new GoogleGenAI({ 
-  apiKey,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+export function setStoredApiKey(key: string): void {
+  if (typeof window !== 'undefined') {
+    if (key && key.trim()) {
+      localStorage.setItem('gemini_api_key', key.trim());
+    } else {
+      localStorage.removeItem('gemini_api_key');
     }
   }
+}
+
+export function hasApiKey(): boolean {
+  return !!getApiKey();
+}
+
+export function getAi(): GoogleGenAI {
+  const currentKey = getApiKey();
+  return new GoogleGenAI({ 
+    apiKey: currentKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
+    }
+  });
+}
+
+// Proxy object to dynamically create a client with the freshest API key
+export const ai: GoogleGenAI = new Proxy({} as GoogleGenAI, {
+  get(_target, prop) {
+    const client = getAi();
+    const val = (client as any)[prop];
+    if (typeof val === 'function') {
+      return val.bind(client);
+    }
+    return val;
+  }
 });
+
+export async function testApiKey(candidateKey?: string): Promise<{ success: boolean; message: string }> {
+  const key = (candidateKey !== undefined ? candidateKey : getApiKey()).trim();
+  if (!key) {
+    return { success: false, message: 'Please provide a Gemini API Key.' };
+  }
+  try {
+    const testClient = new GoogleGenAI({ apiKey: key });
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+    let lastErr: any = null;
+    for (const model of modelsToTry) {
+      try {
+        const res = await testClient.models.generateContent({
+          model,
+          contents: 'Say "OK"',
+        });
+        if (res && res.text) {
+          return { success: true, message: `Connected to Google AI Studio (${model})!` };
+        }
+      } catch (err: any) {
+        lastErr = err;
+        const msg = String(err?.message || err).toLowerCase();
+        if (!msg.includes('not found') && !msg.includes('404')) {
+          break;
+        }
+      }
+    }
+    throw lastErr;
+  } catch (err: any) {
+    return { success: false, message: formatGeminiError(err) };
+  }
+}
 
 const safetySettings = [
   {
