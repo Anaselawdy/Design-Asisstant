@@ -138,9 +138,11 @@ Key requirements:
                 updateActiveProjectState(p => { if (p.prompt === promptToTranslate) p.translatedPrompt = translated; });
             }
         } catch (err) {
-            console.error(err);
+            console.warn('Auto-translation notice:', err);
             if (translationRequestCounter.current === currentRequestId) {
-                updateActiveProjectState(p => { p.error = formatGeminiError(err); });
+                updateActiveProjectState(p => { 
+                    if (p.prompt === promptToTranslate) p.translatedPrompt = promptToTranslate; 
+                });
             }
         } finally {
             if (translationRequestCounter.current === currentRequestId) {

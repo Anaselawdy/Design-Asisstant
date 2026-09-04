@@ -70,11 +70,6 @@ export function getAi(): GoogleGenAI {
   const currentKey = getApiKey();
   return new GoogleGenAI({ 
     apiKey: currentKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      }
-    }
   });
 }
 

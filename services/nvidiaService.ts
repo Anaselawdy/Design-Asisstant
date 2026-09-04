@@ -1,6 +1,6 @@
 import { ImageFile } from '../types';
 
-const NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+const NVIDIA_BASE_URL = typeof window !== 'undefined' ? '/api/nvidia' : 'https://integrate.api.nvidia.com/v1';
 
 // Default free models available on NVIDIA NIM (build.nvidia.com)
 export const NVIDIA_MODELS = {
@@ -200,26 +200,50 @@ async function generateFallbackFluxImage(prompt: string, aspectRatio: string = "
 
   const cleanPrompt = encodeURIComponent(prompt.slice(0, 450));
   const seed = Math.floor(Math.random() * 1000000);
-  const url = `https://image.pollinations.ai/prompt/${cleanPrompt}?width=${width}&height=${height}&seed=${seed}&model=flux&nologo=true`;
+  const fluxBase = typeof window !== 'undefined' ? '/api/flux' : 'https://image.pollinations.ai';
+  const url = `${fluxBase}/prompt/${cleanPrompt}?width=${width}&height=${height}&seed=${seed}&model=flux&nologo=true`;
 
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    throw new Error(`Failed to generate image (status ${resp.status})`);
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      throw new Error(`Failed to generate image (status ${resp.status})`);
+    }
+    const blob = await resp.blob();
+    const reader = new FileReader();
+    return new Promise((resolve, reject) => {
+      reader.onloadend = () => {
+        const base64Data = (reader.result as string).split(',')[1];
+        resolve({
+          base64: base64Data,
+          mimeType: blob.type || 'image/png',
+          name: `flux-${Date.now()}.png`,
+        });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch (err: any) {
+    // If proxied fetch fails, retry directly with image.pollinations.ai
+    const directUrl = `https://image.pollinations.ai/prompt/${cleanPrompt}?width=${width}&height=${height}&seed=${seed}&model=flux&nologo=true`;
+    const directResp = await fetch(directUrl);
+    if (!directResp.ok) {
+      throw new Error(`Image service error: ${directResp.status}`);
+    }
+    const blob = await directResp.blob();
+    const reader = new FileReader();
+    return new Promise((resolve, reject) => {
+      reader.onloadend = () => {
+        const base64Data = (reader.result as string).split(',')[1];
+        resolve({
+          base64: base64Data,
+          mimeType: blob.type || 'image/png',
+          name: `flux-${Date.now()}.png`,
+        });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   }
-  const blob = await resp.blob();
-  const reader = new FileReader();
-  return new Promise((resolve, reject) => {
-    reader.onloadend = () => {
-      const base64Data = (reader.result as string).split(',')[1];
-      resolve({
-        base64: base64Data,
-        mimeType: blob.type || 'image/png',
-        name: `nvidia-flux-${Date.now()}.png`,
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
 }
 
 export async function generateNvidiaImage(
